@@ -100,6 +100,71 @@ static void test_config_missing_file(void) {
     ASSERT(res == EOS_ERR_IO, "returns IO error for missing file");
 }
 
+/*
+ * Regression test for the out-of-bounds write in eos_config_load(): a
+ * config listing more than EOS_MAX_PACKAGES packages used to leave pkg_idx
+ * pointing past the end of cfg->packages[] while `section` stayed in
+ * SEC_PKG_ENTRY/SEC_PKG_BUILD/SEC_PKG_OPTIONS, so the *next* package's
+ * fields (version/build/options) were written through cfg->packages[pkg_idx]
+ * with pkg_idx == EOS_MAX_PACKAGES -- one element past the array, which in
+ * EosConfig is immediately followed by `int package_count`. A pre-fix build
+ * would clobber package_count (and beyond) here; this test pins the correct,
+ * safe behavior: extra packages are rejected and package_count stays capped.
+ */
+static void test_config_load_package_overflow(void) {
+    printf("test_config_load_package_overflow:\n");
+    static EosConfig cfg;
+
+    const int total_packages = EOS_MAX_PACKAGES + 3;
+
+    FILE *fp = fopen("test_eos_overflow.yaml", "w");
+    if (!fp) {
+        printf("  SKIP: cannot create test config file\n");
+        return;
+    }
+
+    fprintf(fp, "project:\n");
+    fprintf(fp, "  name: overflow-project\n");
+    fprintf(fp, "  version: 1.0.0\n");
+    fprintf(fp, "\n");
+    fprintf(fp, "packages:\n");
+    for (int i = 0; i < total_packages; i++) {
+        fprintf(fp, "  - name: pkg%d\n", i);
+        fprintf(fp, "    version: 1.0.%d\n", i);
+        fprintf(fp, "    build:\n");
+        fprintf(fp, "      type: cmake\n");
+        fprintf(fp, "    options:\n");
+        fprintf(fp, "      opt%d: val%d\n", i, i);
+    }
+    fclose(fp);
+
+    EosResult res = eos_config_load(&cfg, "test_eos_overflow.yaml");
+
+    ASSERT(res == EOS_OK, "config with too many packages still loads");
+    ASSERT(cfg.package_count == EOS_MAX_PACKAGES,
+           "package_count is capped at EOS_MAX_PACKAGES, not corrupted");
+
+    /* The first package must be entirely unaffected. */
+    ASSERT(strcmp(cfg.packages[0].name, "pkg0") == 0, "first package name intact");
+    ASSERT(strcmp(cfg.packages[0].version, "1.0.0") == 0, "first package version intact");
+
+    /* The last IN-BOUNDS package (index EOS_MAX_PACKAGES-1) must hold its
+     * own data, not data bled in from the rejected packages that follow. */
+    int last = EOS_MAX_PACKAGES - 1;
+    char expected_name[EOS_MAX_NAME];
+    char expected_version[EOS_MAX_NAME];
+    snprintf(expected_name, sizeof(expected_name), "pkg%d", last);
+    snprintf(expected_version, sizeof(expected_version), "1.0.%d", last);
+    ASSERT(strcmp(cfg.packages[last].name, expected_name) == 0,
+           "last in-bounds package name is its own, not overwritten");
+    ASSERT(strcmp(cfg.packages[last].version, expected_version) == 0,
+           "last in-bounds package version is its own, not overwritten");
+    ASSERT(cfg.packages[last].option_count == 1,
+           "last in-bounds package option_count is its own, not overwritten");
+
+    remove("test_eos_overflow.yaml");
+}
+
 int main(void) {
     eos_log_set_level(EOS_LOG_ERROR);
 
@@ -108,6 +173,7 @@ int main(void) {
     test_config_init();
     test_config_load();
     test_config_missing_file();
+    test_config_load_package_overflow();
 
     printf("\n=== Results: %d/%d passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
