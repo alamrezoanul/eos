@@ -39,6 +39,11 @@ static int indent_level(const char *line) {
     return n / 2;
 }
 
+/* A package index is only safe to dereference when a `- name:` entry claimed
+ * a slot for it. It is -1 before the first entry and after one is refused for
+ * exceeding EOS_MAX_PACKAGES, so both ends have to be checked. */
+#define PKG_IDX_VALID(i) ((i) >= 0 && (i) < EOS_MAX_PACKAGES)
+
 static int parse_kv(const char *line, char *key, size_t ksz, char *val, size_t vsz) {
     const char *colon = strchr(line, ':');
     if (!colon) return -1;
